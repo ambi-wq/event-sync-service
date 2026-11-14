@@ -21,7 +21,7 @@ Then open http://localhost:8000. The API docs are at http://localhost:8000/docs.
 ```
 main.py            the API (3 endpoints) + serves the page
 reconcile.py       all the logic: cleaning, duplicates, matching, comparing
-frontend/index.html  the page
+index.html  the page
 data/              the two JSON files
 ```
 
