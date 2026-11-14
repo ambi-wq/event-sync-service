@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Event Sync</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 24px; background: #f5f6f8; color: #222; }
+    h1 { margin: 0 0 4px; font-size: 22px; }
+    .sub { color: #666; margin-bottom: 16px; }
+    .bar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+    select { padding: 6px; }
+    #summary { color: #444; }
+    table { width: 100%; border-collapse: collapse; background: #fff; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e3e5e9; vertical-align: top; }
+    th { background: #fafafa; font-size: 13px; color: #555; }
+    tr.meeting { cursor: pointer; }
+    tr.meeting:hover { background: #f0f4ff; }
+    tr.has-conflict td:first-child { border-left: 4px solid #e08a00; }
+    .tag { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 12px; margin-right: 4px; }
+    .crm { background: #d9f2ee; color: #0b6b60; }
+    .calendar { background: #e3e1fb; color: #3b33b5; }
+    .both { background: #d9f2ee; color: #333; border: 1px solid #b8b3f0; }
+    .conflict-tag { background: #fff0d6; color: #a85f00; }
+    .small { font-size: 12px; color: #777; }
+    .detail td { background: #f7f8fc; padding: 14px 20px; }
+    .detail table { font-size: 13px; }
+    .detail tr.conflict td { background: #fff0d6; }
+    .none { color: #aaa; }
+    h2 { font-size: 18px; margin-top: 32px; }
+    ul { margin: 4px 0; padding-left: 20px; }
+  </style>
+</head>
+<body>
+  <h1>Event Sync</h1>
+  <div class="sub">CRM + calendar meetings merged into one list. Click a row to see where each value came from.</div>
+
+  <div class="bar">
+    <label>Show:
+      <select id="filter">
+        <option value="">All meetings</option>
+        <option value="both">In both CRM and calendar</option>
+        <option value="crm">CRM only</option>
+        <option value="calendar">Calendar only</option>
+        <option value="conflicts">Only meetings with conflicts</option>
+      </select>
+    </label>
+    <span id="summary"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>When</th><th>Meeting</th><th>Where</th><th>Status</th><th>Source</th><th>Conflicts</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <h2>Data issues found</h2>
+  <ul id="issues"></ul>
+
+<script>
+  const labels = { title: "Title", start: "Start", end: "End", location: "Location", type: "Meeting type",
+    status: "Status", owner: "Owner", client: "Client", company: "Company", attendees: "Attendees",
+    crm_notes: "CRM notes", calendar_description: "Calendar description" };
+  const sourceName = { crm: "CRM", calendar: "Calendar", both: "Both" };
+  let openId = null;
+
+  // times come back already in the service timezone, so just trim the text
+  function showTime(iso) {
+    if (!iso) return "";
+    return iso.length === 10 ? iso + " (no time)" : iso.slice(0, 10) + " " + iso.slice(11, 16);
+  }
+  function showValue(key, v) {
+    if (v === null || v === undefined || v === "") return '<span class="none">-</span>';
+    if (Array.isArray(v)) return v.join("<br>");
+    if (key === "start" || key === "end") return showTime(v);
+    return String(v).replace(/</g, "&lt;");
+  }
+  function esc(s) { return String(s ?? "").replace(/</g, "&lt;"); }
+
+  async function loadMeetings() {
+    const f = document.getElementById("filter").value;
+    const params = new URLSearchParams();
+    if (f === "conflicts") params.set("conflicts", "true");
+    else if (f) params.set("source", f);
+
+    const meetings = await (await fetch("/api/meetings?" + params)).json();
+    document.getElementById("summary").textContent = meetings.length + " meetings, " +
+      meetings.filter(m => m.conflicts.length).length + " with conflicts";
+
+    const tbody = document.getElementById("rows");
+    tbody.innerHTML = "";
+    meetings.forEach(m => {
+      const tr = document.createElement("tr");
+      tr.className = "meeting" + (m.conflicts.length ? " has-conflict" : "");
+      const sourceTag = m.sources.length === 2
+        ? '<span class="tag both">CRM + Calendar</span>'
+        : `<span class="tag ${m.sources[0]}">${sourceName[m.sources[0]]} only</span>`;
+      tr.innerHTML = `
+        <td>${showTime(m.start)}</td>
+        <td><b>${esc(m.title)}</b><div class="small">${esc(m.id)}</div></td>
+        <td>${showValue("location", m.fields.location.value)}</td>
+        <td>${showValue("status", m.fields.status.value)}</td>
+        <td>${sourceTag}</td>
+        <td>${m.conflicts.map(c => `<span class="tag conflict-tag">${labels[c]}</span>`).join("") || '<span class="none">none</span>'}</td>`;
+      tr.onclick = () => toggleDetail(tr, m);
+      tbody.appendChild(tr);
+      if (m.id === openId) toggleDetail(tr, m, true);
+    });
+  }
+
+  function toggleDetail(row, m, keepOpen) {
+    const next = row.nextElementSibling;
+    if (next && next.classList.contains("detail")) {
+      next.remove();
+      if (!keepOpen) { openId = null; return; }
+    }
+    document.querySelectorAll("tr.detail").forEach(r => r.remove());
+    openId = m.id;
+
+    const rows = Object.entries(m.fields).filter(([k, f]) => f.status !== "empty").map(([k, f]) => `
+      <tr class="${f.status === "conflict" ? "conflict" : ""}">
+        <td><b>${labels[k]}</b></td>
+        <td>${showValue(k, f.value)}<div class="small">from ${sourceName[f.source] || "-"}</div></td>
+        <td>${showValue(k, f.crm)}</td>
+        <td>${showValue(k, f.calendar)}</td>
+        <td>${f.status.replace("_", " ")}<div class="small">${esc(f.note)}</div></td>
+      </tr>`).join("");
+
+    const detail = document.createElement("tr");
+    detail.className = "detail";
+    detail.innerHTML = `<td colspan="6">
+      <table>
+        <tr><th>Field</th><th>Shown</th><th>CRM said</th><th>Calendar said</th><th>Result</th></tr>
+        ${rows}
+      </table>
+      <p class="small"><b>How it was matched:</b>
+        ${m.match_score !== null ? "score " + m.match_score + "/100 - " : ""}${m.match_reasons.map(esc).join("; ")}</p>
+      ${m.problems.length ? "<p class='small'><b>Data issues:</b></p><ul class='small'>" + m.problems.map(p => "<li>" + esc(p) + "</li>").join("") + "</ul>" : ""}
+    </td>`;
+    row.after(detail);
+  }
+
+  async function loadIssues() {
+    const issues = await (await fetch("/api/issues")).json();
+    document.getElementById("issues").innerHTML = issues.map(i =>
+      `<li><b>${esc(i.record)}</b> (${i.source}): ${esc(i.problem)}</li>`).join("");
+  }
+
+  document.getElementById("filter").onchange = loadMeetings;
+  loadMeetings();
+  loadIssues();
+</script>
+</body>
+</html>
